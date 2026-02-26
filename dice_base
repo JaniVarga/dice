@@ -1,0 +1,236 @@
+# https://docs.opencv.org/4.x/d6/d00/tutorial_py_root.html
+# https://docs.opencv.org/4.x/d2/d96/tutorial_py_table_of_contents_imgproc.html
+# 71
+
+import cv2
+import numpy as np
+
+class ImageProcessor():
+    def __init__(self, file_path: str, resize_width: int = 400) -> None:
+        self.path = file_path
+        self.resize_width = resize_width
+
+    def load_image(self):
+        img = cv2.imread(self.path, cv2.IMREAD_COLOR)
+        if img is None:
+            raise FileNotFoundError(f"Image could not be loaded: {self.path}")
+        return img
+
+    def show_image(self, win_name, image):
+        cv2.imshow(win_name, image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    def preprocessing(self, loaded_image):
+        height, width = loaded_image.shape[:2]
+
+        if width == 0:
+            raise ValueError("Image width equal to 0")
+
+        # Resize image
+        aspect_ratio = self.resize_width/width
+        resized_image = cv2.resize(loaded_image, dsize=(self.resize_width, int(height*aspect_ratio)))
+
+        # Convert BGR to Gray
+        # gray = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
+
+        # Non-Local Means (NLM) Denoising
+        gray = cv2.fastNlMeansDenoising(resized_image)
+
+        # Filtering the image
+        gauss = cv2.GaussianBlur(gray, ksize=(5, 5), sigmaX=0)
+
+        return gauss
+
+    def find_blobs_with_connected_components(self, preprocessed_image):
+        gray = cv2.cvtColor(preprocessed_image, cv2.COLOR_BGR2GRAY)
+        # Otsu's thresholding after Gaussian filtering
+        _, th3 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Morp filtering
+        # https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
+        kernel = np.ones((3, 3), np.uint8)
+        opening = cv2.morphologyEx(th3, cv2.MORPH_OPEN, kernel)
+
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(opening)
+        for c in centroids[1:]:
+            center = (int(c[0]), int(c[1]))
+            cv2.circle(img=preprocessed_image, center=center, radius=10, color=(0,0,255), thickness=1)
+
+        return preprocessed_image, num_labels
+
+    def find_blobs_with_hough(self, img):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        circles = cv2.HoughCircles(image=gray,
+                         method=cv2.HOUGH_GRADIENT,
+                         dp=1.2,
+                         minDist=30,
+                         param1=100,  # belső Canny high threshold
+                         param2=25,  # kör "szigorúság"
+                         minRadius=5,
+                         maxRadius=50 # 40 -ről indultam
+                         )
+        circles = circles[0]
+        for c in circles:
+            center = (int(c[0]), int(c[1]))
+            cv2.circle(img=img, center=center, radius=int(c[2])+5, color=(255, 0, 0), thickness=1)
+        return len(circles),img
+
+    def find_blobs_with_countours(self, preprocessed_image):
+        gray = cv2.cvtColor(preprocessed_image, cv2.COLOR_BGR2GRAY)
+        # Otsu's thresholding after Gaussian filtering
+        _, th3 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Morp filtering
+        # https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
+        kernel = np.ones((3, 3), np.uint8)
+        opening = cv2.morphologyEx(th3, cv2.MORPH_OPEN, kernel)
+
+        circles = []
+        contours,  hierarchy = cv2.findContours(opening, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 50:
+                continue
+            perimeter = cv2.arcLength(cnt, True)
+            circularity = 4 * np.pi * area / (perimeter ** 2)
+
+            if 0.75 < circularity <= 1.2:
+                circles.append(cnt)
+
+        contours = cv2.drawContours(preprocessed_image, circles, -1, (0, 255, 0), 2)
+        return len(circles), contours
+
+    def find_blobs_with_countours_hu_moments(self, preprocessed_image):
+        gray = cv2.cvtColor(preprocessed_image, cv2.COLOR_BGR2GRAY)
+        # Threshold
+        _, th3 = cv2.threshold(
+            gray, 0, 255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+
+        # Morfológiai nyitás
+        kernel = np.ones((3, 3), np.uint8)
+        opening = cv2.morphologyEx(th3, cv2.MORPH_OPEN, kernel)
+
+        circles = []
+        eps = 1e-10
+        # Referencia Hu számítás
+        ref_img = np.zeros((200, 200), dtype=np.uint8)
+        cv2.circle(ref_img, (100, 100), 40, 255, -1)
+
+        ref_contours, _ = cv2.findContours(ref_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        reference_contour = ref_contours[0]
+
+        ref_moment = cv2.moments(reference_contour)
+        reference_hu = cv2.HuMoments(ref_moment)
+        reference_hu = -np.sign(reference_hu) * np.log10(np.abs(reference_hu) + eps)
+
+        # Kontúrok keresése
+        contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 50:  # zaj szűrés
+                continue
+
+            moment = cv2.moments(cnt)
+            hu = cv2.HuMoments(moment)
+            hu = -np.sign(hu) * np.log10(np.abs(hu))
+
+            distance = np.linalg.norm(hu - reference_hu)
+            if distance < 100.0:
+                circles.append(cnt)
+
+        # Rajzolás egyszerre az összes találatra
+        cv2.drawContours(preprocessed_image, circles, -1, (0, 255, 255), 2)
+
+        return len(circles), preprocessed_image
+
+    def contour_polyDP(self, preprocessed_image):
+        gray = cv2.cvtColor(preprocessed_image, cv2.COLOR_BGR2GRAY)
+        # Threshold
+        _, th3 = cv2.threshold(
+            gray, 0, 255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+
+        # Morfológiai nyitás
+        kernel = np.ones((3, 3), np.uint8)
+        opening = cv2.morphologyEx(th3, cv2.MORPH_OPEN, kernel)
+        contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        circ = []
+        for cnt in contours:
+            epsilon = 0.02 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            if 5 <= len(approx) <= 10:
+                circ.append(cnt)
+        cv2.drawContours(preprocessed_image, circ, -1, (255, 255, 0), 2)
+        return len(circ), preprocessed_image
+
+    # https: // learnopencv.com / blob - detection - using - opencv - python - c /
+    def simple_blob_detector_by_opencv(self,preprocessed_image):
+        gray = cv2.cvtColor(preprocessed_image, cv2.COLOR_BGR2GRAY)
+        params = cv2.SimpleBlobDetector_Params()
+
+        # Change thresholds
+        params.minThreshold = 50
+        params.maxThreshold = 190
+
+        # Filter by Area.
+        params.filterByArea = True
+        params.minArea = 50
+
+        # Filter by Circularity
+        params.filterByCircularity = True
+        params.minCircularity = 0.1
+
+        # Filter by Convexity
+        params.filterByConvexity = True
+        params.minConvexity = 0.75
+
+        # Filter by Inertia
+        params.filterByInertia = True
+        params.minInertiaRatio = 0.01
+
+        detector = cv2.SimpleBlobDetector_create(params)
+        keypoints = detector.detect(gray)
+
+        # Draw blobs as red circles
+        output = cv2.drawKeypoints(preprocessed_image, keypoints, np.array([]), (0, 0, 255),
+                                   cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+
+        return output, len(keypoints)
+
+    def run(self):
+        img = self.load_image()
+        preprocessed_image = self.preprocessing(img)
+
+        cc_img, cc_count = self.find_blobs_with_connected_components(preprocessed_image.copy())
+        self.show_image("Connected Components", cc_img)
+        print(f"Connected Components : {cc_count-1}")
+
+        hc_count, hc_img = self.find_blobs_with_hough(preprocessed_image.copy())
+        self.show_image("Hough Circles", hc_img)
+        print(f"Hough Circles: {hc_count}")
+
+        ccy_count, ccy_img = self.find_blobs_with_countours(preprocessed_image.copy())
+        self.show_image("Contours Circularity", ccy_img)
+        print(f"Contours Circularity: {ccy_count}")
+
+        hm_count, hm_img = self.find_blobs_with_countours_hu_moments(preprocessed_image.copy())
+        self.show_image("Contours Hu Moments", hm_img)
+        print(f"Contours Hu Moments: {hm_count}")
+
+        cpdp_count, cpdp_img = self.contour_polyDP(preprocessed_image.copy())
+        self.show_image("Contours polyDP", cpdp_img)
+        print(f"Contours polyDP: {cpdp_count}")
+
+        sbd_img, sbd_count = self.simple_blob_detector_by_opencv(preprocessed_image.copy())
+        self.show_image("Simple Blob Detector", sbd_img)
+        print(f"Simple Blob Detector: {sbd_count}")
+
+f_p = r"istockphoto-1309668584-2048x2048.jpg"
+
+result = ImageProcessor(f_p)
+result.run()
