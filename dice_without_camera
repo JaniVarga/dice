@@ -1,0 +1,121 @@
+import cv2
+import numpy as np
+import numpy.typing as npt
+from typing import List, Tuple
+
+class DiceImageProcessor():
+    def __init__(self, image_path: str, resize_width: int = 400) -> None:
+        self.img = image_path
+        self.resize_width = resize_width
+
+    def load_image(self) -> npt.NDArray[np.uint8]:
+        img =cv2.imread(self.img, cv2.IMREAD_COLOR)
+        if img is None:
+            raise FileNotFoundError(f"Image could not be loaded: {self.img}")
+        return img
+
+    def show_image(self, win_name: str, image: npt.NDArray[np.uint8]) -> None:
+        cv2.imshow(win_name, image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    # Nem használom de nem akarom kitorlni ha már beleszenvedtem, Canny lesz helyette
+    # def shadow_remover(self, img: npt.NDArray, sigma: int = 80) -> npt.NDArray[np.uint8]:
+    #     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    #     # Gauss blur = illumination becslés
+    #     # SSR formula
+    #     eps = 1e-6
+    #     gray = gray.astype(np.float32) + eps
+    #     blur = cv2.GaussianBlur(gray, (0, 0), sigma)
+    #
+    #     retinex = np.log(gray) - np.log(blur + eps)
+    #     retinex = cv2.normalize(retinex, None, 0, 255, cv2.NORM_MINMAX)
+    #     return retinex.astype(np.uint8)
+
+    def preprocess_image(self, img: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
+        if self.resize_width <= 0:
+            raise ValueError("resize_width must be > 0")
+        height, width = img.shape[:2]
+
+        if width == 0:
+            raise ValueError("Image width cannot be 0")
+
+        # Resize image
+        aspect_ratio = self.resize_width / width
+        resized_image = cv2.resize(img, dsize=(self.resize_width, int(height * aspect_ratio)))
+
+        # Non-Local Means (NLM) Denoising ha mr tudom, hogy van ilyen itt hagyom hogy ne felejtsem el
+        # denoised_image = cv2.fastNlMeansDenoisingColored(resized_image)
+        blurred_image = cv2.GaussianBlur(resized_image, (5, 5), 0)
+        return blurred_image
+
+    def dice_finding(self, img: npt.NDArray[np.uint8]) -> List[Tuple[int, int, int, int]]:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 30, 150)
+        kernel = np.ones((7, 7), np.uint8)
+        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        dices = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 50:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspect_ratio = w / h
+            if not (0.8 < aspect_ratio < 1.2):
+                continue
+
+            rectangle = cv2.boundingRect(cnt)
+            dices.append(rectangle)
+        return dices
+
+    def blob_detection(self, roi: npt.NDArray[np.uint8]) -> List[cv2.KeyPoint]:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        blur = cv2.GaussianBlur(gray, (0, 0), 45)
+        norm = cv2.divide(gray, blur, scale=255)
+
+        _, th = cv2.threshold(
+            norm, 0, 255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+        # Morfológiai nyitás
+        kernel = np.ones((3, 3), np.uint8)
+        opening = cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel)
+        contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        circ = []
+        for cnt in contours:
+            epsilon = 0.02 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            if 5 <= len(approx) <= 10:
+                circ.append(cnt)
+        return circ
+
+    def count_blobs_on_dices(self,img: npt.NDArray[np.uint8], dice_positions: List[Tuple[int, int, int, int]]):
+        result = []
+        for rect in dice_positions:
+            x, y, w, h = rect
+            roi = img[y:y + h, x:x + w]
+            blob = self.blob_detection(roi)
+            result.append(len(blob))
+
+            output = roi.copy()
+            cv2.drawContours(output, blob, -1, (255, 255, 0), 2)
+
+        return result
+
+    def run(self):
+        img = self.load_image()
+        resized_image = self.preprocess_image(img)
+        dice_positions = self.dice_finding(resized_image)
+        final = self.count_blobs_on_dices(resized_image, dice_positions)
+        print(f"Number of dice(s): {len(final)}")
+        for k,i in enumerate(final):
+            print(f"{k}. dice blobsa are: {i}")
+
+f_p = r"C:\Users\jvarga1\PycharmProjects\Dice\12800ea0-e610-46e2-93d7-40f97846f476.jpg"
+
+result = DiceImageProcessor(f_p)
+result.run()
