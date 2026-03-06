@@ -1,0 +1,127 @@
+import cv2
+import numpy as np
+import numpy.typing as npt
+from typing import List, Tuple
+
+class DiceCounter():
+    def __init__(self, resize_width: int = 400, camera_id: int =0) -> None:
+        self.resize_width = resize_width
+        self.id = camera_id
+
+    def show_image(self, win_name: str, image: npt.NDArray[np.uint8]) -> None:
+        cv2.imshow(win_name, image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    def preprocess_image(self, img: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
+        if self.resize_width <= 0:
+            raise ValueError("resize_width must be > 0")
+        height, width = img.shape[:2]
+
+        if width == 0:
+            raise ValueError("Image width cannot be 0")
+
+        # Resize image
+        aspect_ratio = self.resize_width / width
+        resized_image = cv2.resize(img, dsize=(self.resize_width, int(height * aspect_ratio)))
+
+        blurred_image = cv2.GaussianBlur(resized_image, (5, 5), 0)
+        return blurred_image
+
+    def dice_finding(self, img: npt.NDArray[np.uint8]) -> List[Tuple[int, int, int, int]]:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # CLAHE – fény stabilizálás
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+        edges = cv2.Canny(gray, 30, 150)
+        kernel = np.ones((7, 7), np.uint8)
+        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        dices = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 500:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspect_ratio = w / h
+            if not (0.8 < aspect_ratio < 1.2):
+                continue
+
+            rectangle = cv2.boundingRect(cnt)
+            dices.append(rectangle)
+        return dices
+
+    def blob_detection(self, roi: npt.NDArray[np.uint8]) -> List[np.ndarray]:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        blur = cv2.GaussianBlur(gray, (0, 0), 45)
+        norm = cv2.divide(gray, blur, scale=255)
+
+        _, th = cv2.threshold(
+            norm, 0, 255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+        # Morfológiai nyitás
+        kernel = np.ones((3, 3), np.uint8)
+        opening = cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel)
+        contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        circ = []
+        for cnt in contours:
+            epsilon = 0.02 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            if 5 <= len(approx) <= 10:
+                circ.append(cnt)
+        return circ
+
+    def count_blobs_on_dices(self, img: npt.NDArray[np.uint8], dice_positions: List[Tuple[int, int, int, int]]):
+        result = []
+        for rect in dice_positions:
+            pad = 5
+            x, y, w, h = rect
+            roi = img[y:y + h + pad , x:x + w + pad]
+            blob = self.blob_detection(roi)
+            result.append(len(blob))
+
+        return result
+
+    def run(self):
+        cap = cv2.VideoCapture(self.id, cv2.CAP_DSHOW)
+
+        if not cap.isOpened():
+            print("Cannot open camera")
+            return
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            resized_image = self.preprocess_image(frame)
+
+            dice_positions = self.dice_finding(resized_image)
+            values = self.count_blobs_on_dices(resized_image, dice_positions)
+
+            for (x, y, w, h), value in zip(dice_positions, values):
+                cv2.rectangle(resized_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(
+                    resized_image,
+                    str(value),
+                    (x, y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2
+                )
+
+            cv2.imshow("Dice detection", resized_image)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+result = DiceCounter()
+result.run()
